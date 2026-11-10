@@ -56,6 +56,16 @@ function performRealtimeSpeechRequest(text, timeoutSeconds, completion) {
         return appended && typeof appended.toBase64 === 'function' ? appended : target;
     }
 
+    function getNativeAudioLength(data) {
+        var length = getRawDataLength(data);
+        if (length < 0 && data && typeof data.toBase64 === 'function') {
+            try {
+                length = getBase64DecodedLength(String(data.toBase64() || '').replace(/\s+/g, ''));
+            } catch (ignored) {}
+        }
+        return length;
+    }
+
     function appendAudio(itemId, value) {
         if (typeof value !== 'string') {
             fail('Realtime 返回的音频分片无效。');
@@ -81,14 +91,17 @@ function performRealtimeSpeechRequest(text, timeoutSeconds, completion) {
         // repeated JavaScript copies of the whole recording for each delta.
         if (nativeBuffer !== false && typeof $data !== 'undefined' && $data && typeof $data.fromBase64 === 'function') {
             chunk = $data.fromBase64(value);
-            if (!chunk || getRawDataLength(chunk) !== length) {
+            if (!chunk || getNativeAudioLength(chunk) !== length) {
                 fail('Realtime 音频分片解码失败。');
                 return;
             }
             if (nativeBuffer === null) nativeBuffer = typeof chunk.appendData === 'function';
             if (nativeBuffer) {
                 segment.data = appendNativeData(segment.data, chunk);
-                if (getRawDataLength(segment.data) !== segment.length + length) {
+                var segmentLength = getRawDataLength(segment.data);
+                // Bob 1.20 may hide native lengths; defer those checks until completion
+                // instead of re-encoding the growing recording after every delta.
+                if (segmentLength >= 0 && segmentLength !== segment.length + length) {
                     fail('Realtime 音频数据拼接失败。');
                     return;
                 }
@@ -152,7 +165,7 @@ function performRealtimeSpeechRequest(text, timeoutSeconds, completion) {
         if (nativeBuffer) {
             var data = null;
             for (var j = 0; j < spoken.length; j++) data = appendNativeData(data, spoken[j].data);
-            if (getRawDataLength(data) !== spokenLength) {
+            if (getNativeAudioLength(data) !== spokenLength) {
                 fail('Realtime 音频数据拼接失败。');
                 return;
             }

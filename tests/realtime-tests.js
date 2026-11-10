@@ -93,6 +93,12 @@ module.exports = function registerRealtimeTests(h) {
     assert.deepEqual(Buffer.from(result.base64, 'base64'), Buffer.from(makeWavFile(bytes || PCM)));
   }
 
+  function lengthlessData(bytes, overrides) {
+    const data = rawData(bytes, overrides);
+    Object.defineProperty(data, 'length', { get() { return undefined; }, set() {} });
+    return data;
+  }
+
   test('Realtime uses Bob WebSocket GA configuration and a separate verbatim response', () => {
     const state = setup({ instructions: 'Speak calmly.', speed: '1.25' }).start('What is 2 + 2?', 17);
     assert.equal(state.opens, 1);
@@ -197,6 +203,72 @@ module.exports = function registerRealtimeTests(h) {
     state.start().configure().created().audio(PCM.slice(0, 2)).audio(PCM.slice(2, 4)).audio(PCM.slice(4), 'resp-test', 'item-next').done();
     assertFinished(state);
     assertWav(state.results[0]);
+  });
+
+  test('Realtime accepts lengthless Bob data without repeatedly encoding accumulated audio', () => {
+    for (const returnsNewData of [false, true]) {
+      const state = setup();
+      const encodedLengths = [];
+      function nativeData(bytes) {
+        const data = lengthlessData(bytes);
+        const encode = data.toBase64;
+        data.toBase64 = function() {
+          encodedLengths.push(this.toByteArray().length);
+          return encode.call(this);
+        };
+        if (returnsNewData) data.appendData = other => nativeData(bytes.concat(other.toByteArray()));
+        return data;
+      }
+      state.plugin.context.$data.fromBase64 = value => nativeData(Array.from(Buffer.from(value, 'base64')));
+      state.plugin.context.$data.fromByteArray = bytes => nativeData(Array.from(bytes));
+      state.plugin.context.decodeBase64 = () => assert.fail('must retain native audio storage');
+      state.start().configure().created().audio([9, 9], 'resp-test', 'preamble');
+      state.audio(PCM.slice(0, 1), 'resp-test', 'first').audio(PCM.slice(1, 4), 'resp-test', 'first');
+      state.audio(PCM.slice(4), 'resp-test', 'second');
+      assert.equal(state.results.length, 0);
+      state.done('completed', undefined, 'resp-test', [{ id: 'preamble', phase: 'commentary' }, { id: 'first' }, { id: 'second' }]);
+      assertFinished(state);
+      assertWav(state.results[0]);
+      assert.deepEqual(encodedLengths, [2, 1, 3, 4, 8, 52]);
+    }
+  });
+
+  test('Realtime rejects failed or inconsistent decoding even without native length properties', () => {
+    for (const mode of ['null', 'short', 'invalidBase64', 'throws']) {
+      const state = setup();
+      state.plugin.context.$data.fromBase64 = () => {
+        if (mode === 'null') return null;
+        if (mode === 'short') return lengthlessData([0, 0]);
+        return lengthlessData(PCM, {
+          toBase64() {
+            if (mode === 'throws') throw new Error('native encoding failed');
+            return '!!!=';
+          }
+        });
+      };
+      state.start().configure().created().audio();
+      assertFinished(state);
+      assert.match(state.results[0].error.message, /解码失败/);
+    }
+  });
+
+  test('Realtime rejects truncated lengthless audio after appending chunks or output items', () => {
+    for (const returnsNewData of [false, true]) {
+      for (const separateItems of [false, true]) {
+        const state = setup();
+        state.plugin.context.$data.fromBase64 = value => {
+          const bytes = Array.from(Buffer.from(value, 'base64'));
+          return lengthlessData(bytes, {
+            appendData() { return returnsNewData ? lengthlessData(bytes) : undefined; }
+          });
+        };
+        state.start().configure().created().audio(PCM.slice(0, 4));
+        state.audio(PCM.slice(4), 'resp-test', separateItems ? 'second' : 'item-test').done();
+        assertFinished(state);
+        assert.match(state.results[0].error.message, /拼接失败/);
+        assert.equal(state.results[0].base64, undefined);
+      }
+    }
   });
 
   test('Realtime rejects missing WebSocket or timer support before opening a connection', () => {
